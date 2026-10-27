@@ -1,0 +1,97 @@
+name: Full Stack Application Deployment Test
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  COMPOSE_PROJECT_NAME: myapp
+
+jobs:
+  deploy-and-test:
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create .env file from secrets
+        run: |
+          echo "Creating .env file..."
+          cat > .env << EOF
+          DB_USER=${{ secrets.DB_USER }}
+          DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+          DB_NAME=${{ secrets.DB_NAME }}
+          COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME}
+          EOF
+
+      - name: Deploy with Docker Compose
+        run: |
+          docker compose up -d --build
+          sleep 20
+          docker compose ps
+
+      - name: Verify containers are running
+        run: |
+          if docker compose ps --status running | grep -q "app" \
+             && docker compose ps --status running | grep -q "app-db"; then
+            echo "All containers are running"
+          else
+            echo "Containers failed to start"
+            docker compose logs
+            exit 1
+          fi
+
+      - name: "Test 1: application & DB connectivity"
+        run: |
+          for i in $(seq 1 20); do
+            if curl -fsS http://localhost:8080/health >/dev/null 2>&1 \
+               || curl -fsS http://localhost:8080/ >/dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+          curl -fsS http://localhost:8080/api/items
+
+      - name: "Test 2: data consistency (DB vs Web API)"
+        run: |
+          DB_COUNT=$(docker compose exec -T db psql -U "${{ secrets.DB_USER }}" -d "${{ secrets.DB_NAME }}" -t -c "SELECT COUNT(*) FROM items;" | tr -d ' \n')
+          WEB_COUNT=$(curl -fsS http://localhost:8080/api/items | python3 -c 'import sys,json; print(len(json.load(sys.stdin)))')
+          echo "DB: $DB_COUNT, WEB: $WEB_COUNT"
+          if [ "$DB_COUNT" = "$WEB_COUNT" ] && [ "$DB_COUNT" != "" ]; then
+            echo "Data consistency test passed"
+          else
+            exit 1
+          fi
+
+      - name: Collect logs
+        if: always()
+        run: |
+          docker compose logs > deployment-logs.txt || true
+          docker compose ps -a > docker-ps.txt || true
+
+      - name: Create test report
+        if: always()
+        run: |
+          cat > test-report.md << EOF
+          # Report
+          - DB records: ${DB_COUNT:-n/a}
+          - Web API records: ${WEB_COUNT:-n/a}
+          EOF
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-artifacts
+          path: |
+            .env
+            test-report.md
+            deployment-logs.txt
+            docker-ps.txt
+          retention-days: 30
+
+      - name: Cleanup
+        if: always()
+        run: docker compose down -v || true
