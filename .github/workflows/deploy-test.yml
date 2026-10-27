@@ -16,6 +16,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Force clean database
+        run: docker compose down -v
+
       - name: Create .env file from secrets
         run: |
           Write-Host "Creating .env file..."
@@ -26,6 +29,15 @@ jobs:
           COMPOSE_PROJECT_NAME=${{ env.COMPOSE_PROJECT_NAME }}
           "@
           $envContent | Out-File -FilePath .env -Encoding ascii
+          
+          # Создаем безопасную копию для артефактов (без паролей)
+          $maskedEnv = @"
+          DB_USER=***
+          DB_PASSWORD=***
+          DB_NAME=${{ secrets.DB_NAME }}
+          COMPOSE_PROJECT_NAME=${{ env.COMPOSE_PROJECT_NAME }}
+          "@
+          $maskedEnv | Out-File -FilePath env-masked.txt -Encoding ascii
 
       - name: Deploy with Docker Compose
         run: |
@@ -70,7 +82,6 @@ jobs:
           
           Write-Host "DB: $dbCount, WEB: $webCount"
           
-          # СОХРАНЯЕМ РЕЗУЛЬТАТЫ В ФАЙЛ ДЛЯ СЛЕДУЮЩЕГО ШАГА
           "DB=$dbCount`nWEB=$webCount" | Out-File -FilePath counts.txt
 
           if ($dbCount -eq $webCount -and $dbCount -ne "") {
@@ -79,16 +90,18 @@ jobs:
               exit 1
           }
 
-      - name: Collect logs
+      - name: Collect logs and Docker state
         if: always()
         run: |
+          # Логи контейнеров
           docker compose logs *> deployment-logs.txt
+          # Снимок состояния Docker
           docker compose ps -a *> docker-ps.txt
+          docker images *> docker-images.txt
 
       - name: Create test report
         if: always()
         run: |
-          # ЧИТАЕМ РЕЗУЛЬТАТЫ ИЗ ФАЙЛА
           $counts = Get-Content counts.txt
           $db = ($counts | Where-Object { $_ -match "^DB=" }) -replace "DB=", ""
           $web = ($counts | Where-Object { $_ -match "^WEB=" }) -replace "WEB=", ""
@@ -107,12 +120,13 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: deployment-artifacts
+          name: deployment-${{ github.run_id }}
           path: |
-            .env
+            env-masked.txt
             test-report.md
             deployment-logs.txt
             docker-ps.txt
+            docker-images.txt
           retention-days: 30
 
       - name: Cleanup
