@@ -17,75 +17,79 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Create .env file from secrets
-        shell: bash
         run: |
-          echo "Creating .env file..."
-          cat > .env << EOF
+          Write-Host "Creating .env file..."
+          $envContent = @"
           DB_USER=${{ secrets.DB_USER }}
           DB_PASSWORD=${{ secrets.DB_PASSWORD }}
           DB_NAME=${{ secrets.DB_NAME }}
-          COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME}
-          EOF
+          COMPOSE_PROJECT_NAME=${{ env.COMPOSE_PROJECT_NAME }}
+          "@
+          $envContent | Out-File -FilePath .env -Encoding ascii
 
       - name: Deploy with Docker Compose
-        shell: bash
         run: |
           docker compose up -d --build
-          sleep 20
+          Start-Sleep -Seconds 20
           docker compose ps
 
       - name: Verify containers are running
-        shell: bash
         run: |
-          if docker compose ps --status running | grep -q "app" \
-             && docker compose ps --status running | grep -q "app-db"; then
-            echo "All containers are running"
-          else
-            echo "Containers failed to start"
-            docker compose logs
-            exit 1
-          fi
+          $ps = docker compose ps --status running
+          if ($ps -match "app" -and $ps -match "app-db") {
+              Write-Host "All containers are running"
+          } else {
+              Write-Host "Containers failed to start"
+              docker compose logs
+              exit 1
+          }
 
       - name: "Test 1: application & DB connectivity"
-        shell: bash
         run: |
-          for i in $(seq 1 20); do
-            if curl -fsS http://localhost:8080/health >/dev/null 2>&1 \
-               || curl -fsS http://localhost:8080/ >/dev/null 2>&1; then
-              break
-            fi
-            sleep 2
-          done
-          curl -fsS http://localhost:8080/api/items
+          for ($i=0; $i -lt 20; $i++) {
+              try {
+                  $r = Invoke-WebRequest -Uri "http://localhost:8080/health" -UseBasicParsing -TimeoutSec 2
+                  if ($r.StatusCode -eq 200) { break }
+              } catch {
+                  try {
+                      $r = Invoke-WebRequest -Uri "http://localhost:8080/" -UseBasicParsing -TimeoutSec 2
+                      if ($r.StatusCode -eq 200) { break }
+                  } catch { Start-Sleep -Seconds 2 }
+              }
+          }
+          $items = Invoke-RestMethod -Uri "http://localhost:8080/api/items"
+          Write-Host "Application database connection working"
 
       - name: "Test 2: data consistency (DB vs Web API)"
-        shell: bash
         run: |
-          DB_COUNT=$(docker compose exec -T db psql -U "${{ secrets.DB_USER }}" -d "${{ secrets.DB_NAME }}" -t -c "SELECT COUNT(*) FROM items;" | tr -d ' \n')
-          WEB_COUNT=$(curl -fsS http://localhost:8080/api/items | python3 -c 'import sys,json; print(len(json.load(sys.stdin)))')
-          echo "DB: $DB_COUNT, WEB: $WEB_COUNT"
-          if [ "$DB_COUNT" = "$WEB_COUNT" ] && [ "$DB_COUNT" != "" ]; then
-            echo "Data consistency test passed"
-          else
-            exit 1
-          fi
+          $dbCountRaw = docker compose exec -T db psql -U "${{ secrets.DB_USER }}" -d "${{ secrets.DB_NAME }}" -t -c "SELECT COUNT(*) FROM items;"
+          $dbCount = $dbCountRaw -replace '\s',''
+          
+          $webItems = Invoke-RestMethod -Uri "http://localhost:8080/api/items"
+          $webCount = $webItems.Count
+          
+          Write-Host "DB: $dbCount, WEB: $webCount"
+          if ($dbCount -eq $webCount -and $dbCount -ne "") {
+              Write-Host "Data consistency test passed"
+          } else {
+              exit 1
+          }
 
       - name: Collect logs
         if: always()
-        shell: bash
         run: |
-          docker compose logs > deployment-logs.txt || true
-          docker compose ps -a > docker-ps.txt || true
+          docker compose logs *> deployment-logs.txt
+          docker compose ps -a *> docker-ps.txt
 
       - name: Create test report
         if: always()
-        shell: bash
         run: |
-          cat > test-report.md << EOF
+          $report = @"
           # Report
-          - DB records: ${DB_COUNT:-n/a}
-          - Web API records: ${WEB_COUNT:-n/a}
-          EOF
+          - DB records: $dbCount
+          - Web API records: $webCount
+          "@
+          $report | Out-File -FilePath test-report.md -Encoding utf8
 
       - name: Upload artifacts
         if: always()
@@ -101,5 +105,4 @@ jobs:
 
       - name: Cleanup
         if: always()
-        shell: bash
-        run: docker compose down -v || true
+        run: docker compose down -v
