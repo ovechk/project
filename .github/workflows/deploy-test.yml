@@ -69,6 +69,10 @@ jobs:
           $webCount = $webItems.Count
           
           Write-Host "DB: $dbCount, WEB: $webCount"
+          
+          # СОХРАНЯЕМ РЕЗУЛЬТАТЫ В ФАЙЛ ДЛЯ СЛЕДУЮЩЕГО ШАГА
+          "DB=$dbCount`nWEB=$webCount" | Out-File -FilePath counts.txt
+
           if ($dbCount -eq $webCount -and $dbCount -ne "") {
               Write-Host "Data consistency test passed"
           } else {
@@ -84,10 +88,18 @@ jobs:
       - name: Create test report
         if: always()
         run: |
+          # ЧИТАЕМ РЕЗУЛЬТАТЫ ИЗ ФАЙЛА
+          $counts = Get-Content counts.txt
+          $db = ($counts | Where-Object { $_ -match "^DB=" }) -replace "DB=", ""
+          $web = ($counts | Where-Object { $_ -match "^WEB=" }) -replace "WEB=", ""
+          
+          if (-not $db) { $db = "n/a" }
+          if (-not $web) { $web = "n/a" }
+
           $report = @"
           # Report
-          - DB records: $dbCount
-          - Web API records: $webCount
+          - DB records: $db
+          - Web API records: $web
           "@
           $report | Out-File -FilePath test-report.md -Encoding utf8
 
